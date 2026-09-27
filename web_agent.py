@@ -1,5 +1,5 @@
-import os
 import asyncio
+import os
 import time
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
@@ -7,55 +7,25 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 from aiogram import Bot
+from aiohttp import web
 
 # ================= НАСТРОЙКИ =================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MY_USER_ID = int(os.getenv("MY_USER_ID", "555693826"))
 
-# Список публичных каналов (пиши юзернеймы без знака @)
 CHANNELS = [
-    "naudalenkebro",
-    "normrabota",
-    "distantsiya",
-    "perevod_rabota",
-    "finder_vc",
-    "rueventjob",
-    "theyseeku",
-    "FreelanceBay",
-    "freelancetaverna",
-    "freelancce",
-    "GetClient",
-    "zdemvc",
-    "linguohunter",
-    "frelanserr",
-    "dnative_job100",
-    "marketing_jobs",
-    "vacanciesbest",
-    "budujobs",
-    "theypaygood",
-    "theypaywell",
-    "vacanciesrus",
-    "jobsforyou_biz",
-    "g_jobbot",
-    "distantsiya2",
-    "Well_paid_Job",
+    "naudalenkebro", "normrabota", "distantsiya", "perevod_rabota", "finder_vc",
+    "rueventjob", "theyseeku", "FreelanceBay", "freelancetaverna", "freelancce",
+    "GetClient", "zdemvc", "linguohunter", "frelanserr", "dnative_job100",
+    "marketing_jobs", "vacanciesbest", "budujobs", "theypaygood"
 ]
 
-# Интервал проверки каналов в секундах (например, каждые 3 минуты)
 POLL_INTERVAL = 180
 # =============================================
 
 client_ai = genai.Client(api_key=GEMINI_API_KEY)
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.client.telegram import TelegramAPIServer
-
-# Используем рабочий прокси-шлюз для Bot API
-session = AiohttpSession(
-    api=TelegramAPIServer.from_base('https://api.telegram.org')
-)
-bot = Bot(token=TELEGRAM_BOT_TOKEN, session=session)
-# Храним уже обработанные ID постов { 'channel': {post_id, ...} }
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 seen_posts = {ch: set() for ch in CHANNELS}
 
 class JobDecision(BaseModel):
@@ -100,9 +70,8 @@ def analyze_job(text: str) -> JobDecision:
 async def fetch_channel_posts(session: AsyncSession, channel: str, initial: bool = False):
     url = f"https://t.me/s/{channel}"
     try:
-        resp = await session.get(url, impersonate="safari15_5", timeout=15)
+        resp = await session.get(url, impersonate="safari15_5", timeout=12)
         if resp.status_code != 200:
-            print(f"⚠️ Ошибка доступа к каналу @{channel}: HTTP {resp.status_code}")
             return
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -113,22 +82,19 @@ async def fetch_channel_posts(session: AsyncSession, channel: str, initial: bool
             if not post_div:
                 continue
 
-            post_data = post_div.get("data-post") # формат: "channel/1234"
+            post_data = post_div.get("data-post")
             if not post_data:
                 continue
 
             post_id = post_data.split("/")[-1]
-
             if post_id in seen_posts[channel]:
                 continue
             
             seen_posts[channel].add(post_id)
 
-            # При первом запуске только запоминаем историю, чтобы не спамить старыми постами
             if initial:
                 continue
 
-            # Достаем текст публикации
             text_div = msg.find("div", class_="tgme_widget_message_text")
             if not text_div:
                 continue
@@ -149,44 +115,55 @@ async def fetch_channel_posts(session: AsyncSession, channel: str, initial: bool
                     f"📝 <b>Готовый отклик (тапни для копирования):</b>\n"
                     f"<code>{decision.cover_letter}</code>"
                 )
-
                 try:
-                    await bot.send_message(
-                        chat_id=MY_USER_ID,
-                        text=message,
-                        parse_mode="HTML"
-                    )
+                    await bot.send_message(chat_id=MY_USER_ID, text=message, parse_mode="HTML")
                     print(f"✅ Отправлен алерт: {decision.title}")
                 except Exception as e:
                     print(f"Ошибка отправки в Telegram: {e}")
-
     except Exception as e:
         print(f"Ошибка парсинга @{channel}: {e}")
 
-async def main():
-    # Важная проверка токена бота
-    try:
-        me = await bot.get_me()
-        print(f"🤖 Бот активен: @{me.username}")
-    except Exception as e:
-        print(f"⚠️ Ошибка авторизации бота. Если токен был заморожен, возьми новый в @BotFather: {e}")
-        return
-
+async def monitor_loop():
     print("🚀 Инициализация парсера: прогреваем историю каналов...")
     async with AsyncSession() as session:
         for channel in CHANNELS:
             await fetch_channel_posts(session, channel, initial=True)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
-        print(f"\n📡 Мониторинг запущен! Отслеживаем {len(CHANNELS)} каналов каждые {POLL_INTERVAL} сек.")
-        print("Нажми Ctrl + C для остановки.\n")
-
+        print(f"\n📡 Мониторинг запущен! Отслеживаем {len(CHANNELS)} каналов.")
         while True:
             await asyncio.sleep(POLL_INTERVAL)
             print(f"[{time.strftime('%H:%M:%S')}] Сканируем каналы на новые посты...")
             for channel in CHANNELS:
                 await fetch_channel_posts(session, channel, initial=False)
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1)
+
+# Healthcheck эндпоинт для Render Web Service
+async def handle_ping(request):
+    return web.Response(text="Job Hunter is Running 24/7!")
+
+async def main():
+    try:
+        me = await bot.get_me()
+        print(f"🤖 Бот активен: @{me.username}")
+    except Exception as e:
+        print(f"⚠️ Ошибка авторизации бота: {e}")
+
+    # Запускаем мониторинг в фоне
+    asyncio.create_task(monitor_loop())
+
+    # Запускаем веб-сервер для бесплатного тарифа Render
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 HTTP Healthcheck активен на порту {port}")
+
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
