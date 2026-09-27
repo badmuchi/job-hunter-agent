@@ -1,0 +1,5 @@
+beautifulsoup4
+curl_cffi
+google-genai
+aiogram
+pydantic
